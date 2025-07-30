@@ -4,6 +4,7 @@ import numpy as np
 import requests
 import altair as alt
 from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderUnavailable
 import datetime as dt
 
 st.set_page_config(page_title="PV & Netz Analyse", layout="wide")
@@ -28,16 +29,27 @@ else:
     start_date = st.sidebar.date_input("Startdatum", value=pd.Timestamp(year,1,1))
     end_date = st.sidebar.date_input("Enddatum", value=pd.Timestamp(year,1,31))
 
-# Ort statt Koordinaten
+# Ort oder manuelle Koordinaten
 st.sidebar.subheader("📍 Standort für PVGIS")
 location_input = st.sidebar.text_input("Ort (z.B. Wien, Austria)", "Wien, Austria")
-geolocator = Nominatim(user_agent="pvgis_app")
-location = geolocator.geocode(location_input)
-if location:
-    lat, lon = location.latitude, location.longitude
+lat = None
+lon = None
+if location_input:
+    geolocator = Nominatim(user_agent="pvgis_app")
+    try:
+        location = geolocator.geocode(location_input, timeout=10)
+    except GeocoderUnavailable:
+        location = None
+    if location:
+        lat, lon = location.latitude, location.longitude
+    else:
+        st.sidebar.warning("Geocoding fehlgeschlagen. Bitte Koordinaten manuell eingeben.")
+        lat = st.sidebar.number_input("Latitude", value=48.2082, format="%.6f")
+        lon = st.sidebar.number_input("Longitude", value=16.3738, format="%.6f")
 else:
-    st.error("Ort nicht gefunden. Bitte genaue Ortsangabe eingeben.")
-    st.stop()
+    st.sidebar.warning("Bitte Ort oder Koordinaten angeben.")
+    lat = st.sidebar.number_input("Latitude", value=48.2082, format="%.6f")
+    lon = st.sidebar.number_input("Longitude", value=16.3738, format="%.6f")
 
 netz_csv = st.sidebar.file_uploader("1️⃣ CSV Netzbezug (datetime, power_kw)", type="csv")
 pv_csvs = st.sidebar.file_uploader(
@@ -123,20 +135,32 @@ def main():
     df_all = df_all.loc[mask].sort_values('datetime')
 
     # Datenqualität & Anomalien
-    full_range = pd.date_range(start=df_all['datetime'].min(), end=df_all['datetime'].max(), freq='15T')
+    full_range = pd.date_range(start=df_all['datetime'].min(),
+                               end=df_all['datetime'].max(),
+                               freq='15T')
     missing = full_range.difference(df_all['datetime'])
     if missing.any():
         st.warning(f"Es fehlen {len(missing)} Zeitstempel.")
     q1, q3 = df_all['PV_gesamt_kWh'].quantile([0.25,0.75])
-    outliers = df_all[(df_all['PV_gesamt_kWh'] < q1 - 1.5*(q3-q1)) | (df_all['PV_gesamt_kWh'] > q3 + 1.5*(q3-q1))]
+    outliers = df_all[
+        (df_all['PV_gesamt_kWh'] < q1 - 1.5*(q3-q1)) |
+        (df_all['PV_gesamt_kWh'] > q3 + 1.5*(q3-q1))
+    ]
     if not outliers.empty:
         st.warning(f"{len(outliers)} Ausreißer erkannt.")
 
     # KPIs
-    df_all['Eigenverbrauch_kWh'] = np.minimum(df_all['PV_gesamt_kWh'], df_all['Netzbezug_kWh'])
-    df_all['Einspeisung_kWh'] = df_all['PV_gesamt_kWh'] - df_all['Eigenverbrauch_kWh']
-    total = df_all[['PV_gesamt_kWh','Netzbezug_kWh','Eigenverbrauch_kWh','Einspeisung_kWh']].sum()
-    pr_ratio = calculate_performance_ratio(total['PV_gesamt_kWh'], lat, lon, year)
+    df_all['Eigenverbrauch_kWh'] = np.minimum(
+        df_all['PV_gesamt_kWh'], df_all['Netzbezug_kWh']
+    )
+    df_all['Einspeisung_kWh'] = (
+        df_all['PV_gesamt_kWh'] - df_all['Eigenverbrauch_kWh']
+    )
+    total = df_all[['PV_gesamt_kWh','Netzbezug_kWh',
+                    'Eigenverbrauch_kWh','Einspeisung_kWh']].sum()
+    pr_ratio = calculate_performance_ratio(
+        total['PV_gesamt_kWh'], lat, lon, year
+    )
 
     st.subheader("🔎 Kennzahlen Gesamt")
     cols = st.columns(5)
@@ -154,7 +178,10 @@ def main():
         df_aggr = df_all.resample('W-MON').sum()
     else:
         df_aggr = df_all.resample('M').sum()
-    df_aggr['Autarkie_%'] = df_aggr['Eigenverbrauch_kWh'] / df_aggr['Netzbezug_kWh'] * 100
+    df_aggr['Autarkie_%'] = (
+        df_aggr['Eigenverbrauch_kWh'] /
+        df_aggr['Netzbezug_kWh'] * 100
+    )
     st.subheader(f"📈 {nutzungsbereich}")
     st.line_chart(df_aggr[['PV_gesamt_kWh','Netzbezug_kWh']])
     st.bar_chart(df_aggr['Autarkie_%'])
@@ -163,16 +190,23 @@ def main():
     st.subheader("🚨 Ausreißer & Verteilung")
     st.dataframe(outliers)
     hist = alt.Chart(df_all.reset_index()).mark_bar().encode(
-        alt.X('PV_gesamt_kWh', bin=alt.Bin(maxbins=50)), y='count()'
+        alt.X('PV_gesamt_kWh', bin=alt.Bin(maxbins=50)),
+        y='count()'
     )
     st.altair_chart(hist, use_container_width=True)
 
     st.subheader("📊 Stacked Area Chart")
-    area_df = df_all.reset_index()[['datetime','PV_gesamt_kWh','Eigenverbrauch_kWh','Einspeisung_kWh']]
+    area_df = df_all.reset_index()[['datetime','PV_gesamt_kWh',
+                                     'Eigenverbrauch_kWh',
+                                     'Einspeisung_kWh']]
     area = alt.Chart(area_df).transform_fold(
         ['PV_gesamt_kWh','Eigenverbrauch_kWh','Einspeisung_kWh'],
         as_=['Kategorie','kWh']
-    ).mark_area(opacity=0.5).encode(x='datetime:T', y='kWh:Q', color='Kategorie:N')
+    ).mark_area(opacity=0.5).encode(
+        x='datetime:T',
+        y='kWh:Q',
+        color='Kategorie:N'
+    )
     st.altair_chart(area, use_container_width=True)
 
     simulate_battery(df_all, battery_capacity, effizienz)
