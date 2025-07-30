@@ -51,6 +51,9 @@ else:
     lat = st.sidebar.number_input("Latitude", value=48.2082, format="%.6f")
     lon = st.sidebar.number_input("Longitude", value=16.3738, format="%.6f")
 
+# Debug-Ausgabe Koordinaten und Jahr
+st.sidebar.write(f"Verwendete Koordinaten: lat={lat}, lon={lon}, Jahr={year}")
+
 netz_csv = st.sidebar.file_uploader("1️⃣ CSV Netzbezug (datetime, power_kw)", type="csv")
 pv_csvs = st.sidebar.file_uploader(
     "2️⃣ CSV PV-Erzeugung (datetime, power_kw)",
@@ -70,17 +73,28 @@ def leistung_zu_energie_fest(df, leistung_col='power_kw', zeit_col='datetime'):
     df['energie_kWh'] = df[leistung_col] * INTERVALL_H
     return df[[zeit_col, 'energie_kWh']]
 
-# PVGIS Performance Ratio
+# PVGIS Performance Ratio mit PVcalc-Endpoint
 def calculate_performance_ratio(actual_energy, lat, lon, year):
-    """Ruft PVGIS API auf und berechnet Performance Ratio"""
-    url = f"https://re.jrc.ec.europa.eu/api/v5_2/Tmy?lat={lat}&lon={lon}&outputformat=json"
+    """Ruft PVGIS PVcalc API auf und berechnet Performance Ratio"""
+    url = (
+        f"https://re.jrc.ec.europa.eu/api/v5_2/PVcalc?"
+        f"lat={lat}&lon={lon}&peakpower=1&loss=14&outputformat=json"
+    )
     try:
         resp = requests.get(url)
         data = resp.json()
-        yearly_irr = sum([m['H(i)'] for m in data['outputs']['monthly']])
-        theoretical = yearly_irr
-        return actual_energy / theoretical * 100 if theoretical > 0 else np.nan
-    except Exception:
+        # Debug-Ausgabe API-Antwort
+        st.sidebar.write(data.get('outputs', {}))
+        theoretical = data['outputs']['totals'].get('yearly', 0)
+        st.sidebar.write(f"Theoretischer Jahresertrag (1 kWp): {theoretical} kWh")
+        if theoretical > 0:
+            pr = actual_energy / theoretical * 100
+            return pr
+        else:
+            st.sidebar.error("Keine gültigen PVGIS-Daten für theoretischen Ertrag.")
+            return np.nan
+    except Exception as e:
+        st.sidebar.error(f"PVGIS-API Aufruf fehlgeschlagen: {e}")
         return np.nan
 
 # Batterie-Simulation
@@ -123,7 +137,8 @@ def main():
     df_pv['PV_gesamt_kWh'] = df_pv.drop(columns=['datetime']).sum(axis=1)
 
     df_all = pd.merge(
-        df_pv[['datetime','PV_gesamt_kWh']], df_netz,
+        df_pv[['datetime','PV_gesamt_kWh']],
+        df_netz,
         on='datetime', how='outer'
     ).fillna(0)
 
@@ -193,15 +208,14 @@ def main():
     st.subheader("🚨 Ausreißer & Verteilung")
     st.dataframe(outliers)
     hist = alt.Chart(df_all.reset_index()).mark_bar().encode(
-        alt.X('PV_gesamt_kWh', bin=alt.Bin(maxbins=50)),
-        y='count()'
+        alt.X('PV_gesamt_kWh', bin=alt.Bin(maxbins=50)), y='count()'
     )
     st.altair_chart(hist, use_container_width=True)
 
     st.subheader("📊 Stacked Area Chart")
-    area_df = df_all.reset_index()[['datetime','PV_gesamt_kWh',
-                                     'Eigenverbrauch_kWh',
-                                     'Einspeisung_kWh']]
+    area_df = df_all.reset_index()[[
+        'datetime','PV_gesamt_kWh','Eigenverbrauch_kWh','Einspeisung_kWh'
+    ]]
     area = alt.Chart(area_df).transform_fold(
         ['PV_gesamt_kWh','Eigenverbrauch_kWh','Einspeisung_kWh'],
         as_=['Kategorie','kWh']
