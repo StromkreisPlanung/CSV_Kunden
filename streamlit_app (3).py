@@ -135,11 +135,13 @@ def main():
     df_all = df_all.loc[mask].sort_values('datetime')
 
     # Datenqualität & Anomalien
-    full_range = pd.date_range(start=df_all['datetime'].min(),
-                               end=df_all['datetime'].max(),
-                               freq='15T')
+    full_range = pd.date_range(
+        start=df_all['datetime'].min(),
+        end=df_all['datetime'].max(),
+        freq='15T'
+    )
     missing = full_range.difference(df_all['datetime'])
-    if missing.any():
+    if len(missing) > 0:
         st.warning(f"Es fehlen {len(missing)} Zeitstempel.")
     q1, q3 = df_all['PV_gesamt_kWh'].quantile([0.25,0.75])
     outliers = df_all[
@@ -156,8 +158,9 @@ def main():
     df_all['Einspeisung_kWh'] = (
         df_all['PV_gesamt_kWh'] - df_all['Eigenverbrauch_kWh']
     )
-    total = df_all[['PV_gesamt_kWh','Netzbezug_kWh',
-                    'Eigenverbrauch_kWh','Einspeisung_kWh']].sum()
+    total = df_all[
+        ['PV_gesamt_kWh','Netzbezug_kWh','Eigenverbrauch_kWh','Einspeisung_kWh']
+    ].sum()
     pr_ratio = calculate_performance_ratio(
         total['PV_gesamt_kWh'], lat, lon, year
     )
